@@ -1,7 +1,130 @@
 package controllers
 
-import "github.com/gofiber/fiber/v2"
+import (
+	"app/database"
+	"app/models"
+	"github.com/dgrijalva/jwt-go"
+	"github.com/gofiber/fiber/v2"
+	"golang.org/x/crypto/bcrypt"
+	"strconv"
+	"time"
+)
 
-func Home(c *fiber.Ctx) error {
-	return c.SendString("Hello, World 👋!")
+type Claims struct {
+	jwt.StandardClaims
+}
+
+func Register(c *fiber.Ctx) error {
+
+	var data map[string]string
+
+	if err := c.BodyParser(&data); err != nil {
+		return err
+	}
+
+	if data["password"] != data["password_confirm"] {
+		c.Status(fiber.StatusBadRequest)
+		return c.JSON(fiber.Map{
+			"message": "Passwords do not match!",
+		})
+	}
+
+	password, _ := bcrypt.GenerateFromPassword([]byte(data["password"]), 14)
+
+	user := models.User{
+		FirstName: data["first_name"],
+		LastName:  data["last_name"],
+		Email:     data["email"],
+		Password:  password,
+	}
+
+	database.DB.Create(&user)
+
+	return c.JSON(user)
+}
+
+func Login(c *fiber.Ctx) error {
+	var data map[string]string
+
+	if err := c.BodyParser(&data); err != nil {
+		return err
+	}
+
+	var user models.User
+	database.DB.Where("email = ? ", data["email"]).First(&user)
+
+	if user.Id == 0 {
+		c.Status(fiber.StatusNotFound)
+		return c.JSON(fiber.Map{
+			"message": "Invalid Credentials!",
+		})
+	}
+
+	if err := bcrypt.CompareHashAndPassword(user.Password, []byte(data["password"])); err != nil {
+		c.Status(fiber.StatusBadRequest)
+		return c.JSON(fiber.Map{
+			"message": "Invalid Credentials!",
+		})
+	}
+
+	claims := jwt.StandardClaims{
+		Issuer:    strconv.Itoa(int(user.Id)),
+		ExpiresAt: time.Now().Add(time.Hour * 24).Unix(),
+	}
+
+	jwtToken := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	token, err := jwtToken.SignedString([]byte("3lTAdtaH28ReGkVSewlyqkXv64Oczi67gebpYR7uaJtTUgtD7EEaqTYuvyBjYL"))
+	if err != nil {
+		return c.SendStatus(fiber.StatusInternalServerError)
+	}
+
+	cookie := fiber.Cookie{
+		Name:     "jwt",
+		Value:    token,
+		Expires:  time.Now().Add(time.Hour * 24),
+		HTTPOnly: true,
+	}
+
+	c.Cookie(&cookie)
+
+	return c.JSON(fiber.Map{
+		"jwt": token,
+	})
+}
+
+func User(c *fiber.Ctx) error {
+	cookie := c.Cookies("jwt")
+
+	token, err := jwt.ParseWithClaims(cookie, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		return []byte("3lTAdtaH28ReGkVSewlyqkXv64Oczi67gebpYR7uaJtTUgtD7EEaqTYuvyBjYL"), nil
+	})
+
+	if err != nil || !token.Valid {
+		c.Status(fiber.StatusUnauthorized)
+		return c.JSON(fiber.Map{
+			"message": "Unauthenticated!",
+		})
+	}
+
+	claims := token.Claims.(*Claims)
+
+	var user models.User
+	database.DB.Where("id = ?", claims.Issuer).First(&user)
+
+	return c.JSON(user)
+}
+
+func Logout(c *fiber.Ctx) error {
+	cookie := fiber.Cookie{
+		Name:     "jwt",
+		Value:    "",
+		Expires:  time.Now().Add(-time.Hour * 24),
+		HTTPOnly: true,
+	}
+
+	c.Cookie(&cookie)
+
+	return c.JSON(fiber.Map{
+		"message": "Logout successfully",
+	})
 }
